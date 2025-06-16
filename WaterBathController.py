@@ -1,9 +1,52 @@
 import serial
 import time, datetime
-import csv
+import csv, json
 import threading
 import logging
 import inspect
+
+class ExperimentManager:
+    def __init__(self, tasks, manual_interception = True):
+        self.tasks = tasks
+        self.manual_interception = manual_interception
+        self.runner = ExperimentRunner(tasks, manual_interception = True)
+        self.guardian = CodeManager()
+    def start(self):
+        if self.guarian.recovery_needed:
+            self.guarian.recovery()
+        try:
+            self.guardian.before_start()
+            self.runner.start()
+            self.guardian.after_start()
+        except Exception as e:
+            self.guardian.handle_error(e)
+            raise
+class CodeManager:
+    def __init__(self):
+        self.state = ExperimentStateManager()
+        self.logger = logging.getLogger("CodeSupervisor")
+
+    def recovery_needed(self):
+        return self.state.was_crash_detected()
+
+    def recover(self):
+        self.logger.info("recovery")
+
+    def before_start(self):
+        self.state.mark_running()
+
+    def on_success(self):
+        self.state.mark_success()
+
+    def handle_error(self, exception):
+        self.logger.exception(f"Error was detected in {}. {exception}")
+        send_email_to_user(exception)
+        self.state.mark_failed()
+class ExperimentStateManager:
+    def 
+    pass 
+
+
 
 class ExperimentRunner:
     def __init__(self, tasks, manual_interception = True):
