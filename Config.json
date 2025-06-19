@@ -1,0 +1,33 @@
+{
+  "end_with_error": false,
+  "default_parameters": {
+    "high_temp": 25,
+    "low_temp": 4,
+    "cycle_duration_hours": 12,
+    "experiment_duration_days": 30,
+    "end_cycle_earlier": false
+    "tasks": [
+      {
+        "class": "TemperatureCycle",
+        "args": [],
+        "kwargs": {
+          "interval_hours": 0.2,
+          "period_days": 1
+        }
+      },
+      {
+        "class": "TemperatureLogger",
+        "args": [],
+        "kwargs": {
+          "interval": 60,
+          "period_days": 1
+        }
+      }
+    ]
+  },
+  "current_status": {
+    "current_temp": null,
+    "current_cycle_begin": null,
+    "current_cycle_end": null
+  }
+}
