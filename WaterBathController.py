@@ -1,3 +1,4 @@
+
 import serial
 import time
 import datetime
@@ -10,28 +11,27 @@ import inspect
 
 class main_manager:
     def __init__(self, config_path):
+        self.logger = logging.getLogger()
+        self.logger.info(f'Experiment starting. It is {datetime.datetime.now()}')
         self.config_path = config_path
-        self.code_manager = CodeManager(config_path)
-        self.config_manager = self.code_manager.config_manager
-        self.error_handler = self.code_manager.error_handler
-        self.supervisor = self.code_manager.thread_manager
+        self.code_manager = CodeManager(config_path, self.logger)
         self.experiment_manager = ExperimentManager(
-            self.config_manager, self.error_handler, self.supervisor
+            self.code_manager
         )
-
     def start(self):
         self.experiment_manager.start()
 
 
 class CodeManager:
-    def __init__(self, config):
+    def __init__(self, config, logger):
+        self.logger = logger
         self.config_manager = ConfigManager(config)
-        self.logger = logging.getLogger("CodeSupervisor")
         self.error_handler = ErrorHandler(self.logger, self.config_manager)
-        self.thread_manager = TreadManager(manual_interception=True)
+        self.thread_manager = ThreadManager(manual_interception=True)
+        
 
     def recovery_needed(self):
-        return not self.config_manager.recovery_needed()
+        return self.config_manager.recovery_needed()
 
     def recover(self):
         self.logger.info("Starting recovery logic")
@@ -123,8 +123,9 @@ class ConfigManager:
 
 
 class ErrorHandler:
-    def __init__(self):
-        pass
+    def __init__(self, logger, config_manager):
+        self.logger = logger
+        self.config_manager = config_manager
 
     def mark_error_end(self):
         self.config_manager.update_file({"end_with_error": False})
@@ -137,17 +138,19 @@ class ErrorHandler:
         pass
 
     def handle_error(self, method, error):
-        self.mark_error()
+        self.mark_error_end()
         self.log_error(method, error)
-        self.message_about_error
+        self.message_about_error()
 
 
-class TreadManager:
-    def __init__(self, manual_interseption=True):
+class ThreadManager:
+    def __init__(self):
         self.stop_event = threading.Event()
 
-    def start(self):
-        threading.Thread(target=self.keyboard_listener, daemon=True).start()
+    def start(self, target, name):
+        t = threading.Thread(target=target, name=name)
+        t.start()
+        return t
 
     def keyboard_listener(self):
         input("Press enter to stop...\n")
@@ -155,87 +158,50 @@ class TreadManager:
 
 
 class ExperimentManager:
-    def __init__(self, config):
-        self.config = config
-        self.runner = None
-        self.guardian = CodeManager(config)
-
+    def __init__(self, supervisor):
+        self.supervisor = supervisor
     def start(self):
-        if self.guardian.recovery_needed:
-            self.guardian.recovery()
         try:
-            self.runner = self.guardian.before_start()
+            if self.supervisor.recovery_needed():
+                self.supervisor.recovery()
+            tasks = self.supervisor.before_start()
+            self.runner = ExperimentRunner(tasks, self.supervisor)
             self.runner.start()
-            self.guardian.after_start()
         except Exception as e:
-            self.guardian.handle_error(e)
+            self.supervisor.handle_error("ExperimentManager.start", e)
             raise
 
 
-class ExperimentStateManager:
-    def __init__(self, config_path):
-        self.config_path = config_path
-        with open(config_path) as f:
-            self.config = json.load(f)
-
-    def was_crash_detected(self):
-        return not self.config.get("end_with_error", False)
-
-    def mark_success(self):
-        self.config["end_with_error"] = False
-        with open(self.config_path, "w") as f:
-            json.dump(self.config, f, indent=4)
-
-    def mark_failed(self):
-        self.config["end_with_error"] = True
-        with open(self.config_path, "w") as f:
-            json.dump(self.config, f, indent=4)
-
-    def update_current_status(self, current_temp, cycle_begin, cycle_end):
-        self.config["current_status"] = {
-            "current_temp": current_temp,
-            "current_cycle_begin": cycle_begin,
-            "current_cycle_end": cycle_end,
-        }
-        with open(self.config_path, "w") as f:
-            json.dump(self.config, f, indent=4)
-
-
 class ExperimentRunner:
-    def __init__(self, tasks, manual_interception=True):
-        self.tasks = []
-        self.original_tasks = tasks
+    def __init__(self, tasks, supervisor):
+        self.tasks = tasks  
         self.threads = []
-        self.objs = []
-        self.threads_objects = []
-        self.logger = logging.getLogger(__name__)
-        if manual_interception:
-            self.interceptor = ProccessIntereptor()
-            self.interceptor.start()
-            self.stop_event = self.interceptor.stop_event
-        else:
-            self.interceptor = None
-            self.stop_event = None
-        for cls, args, kwargs in tasks:
-            kwargs = kwargs.copy()
-            if 'stop_event' in inspect.signature(cls.__init__).parameters:
-                kwargs.setdefault('stop_event', self.stop_event)
-            self.tasks.append((cls, args, kwargs))
+        self.logger = logging.getLogger("ExperimentRunner")
+        self.supervisor = supervisor
 
     def start(self):
-
         try:
-            for cls, args, Kwargs in self.tasks:
-                obj = cls(*args, **Kwargs)
-                name = getattr(cls, "name", obj.__class__.__name__)
-                self.objs.append(name)
-                t = threading.Thread(target=obj.start)
-                t.start()
-                self.threads_objects.append(t)
-                time.sleep(20)
-            self.logger.info('Experiment starts succesfully')
+            self.logger.info("Experiment is starting...")
+            for cls, args, kwargs in self.tasks:
+
+
+                obj = cls(*args, **kwargs)
+
+                name = getattr(obj, 'name', obj.__class__.__name__)
+                self.logger.info(f"Starting task: {name}")
+
+                t = self.supervisor.thread_manager.start(target=obj.start, name=name)
+                self.threads.append(t)
+
+            self.logger.info("All tasks have been launched.")
+
+            for t in self.threads:
+                t.join()
+
+            self.logger.info("Experiment completed successfully.")
+
         except Exception as e:
-            self.logger.info(f'Error while started the experiment. {e}')
+            self.supervisor.error_handler.handle_error('experiment_runner start', e)
 
 
 class TemperatureLogger:
@@ -328,8 +294,15 @@ class TemperatureCycle:
     def set_controller_temperature(self, temperature):
         self.logger.info('Change controller temperature')
         self.controller.set_water_bath_temperature(temperature)
-
-    def cycling(self, interval_hours, period_days):
+    def update_current_satus(self, temperature):
+        current_status = {
+    "current_temp": temperature,
+    "current_cycle_begin": datetime.datetime.now(),
+    "current_cycle_end": datetime.datetime.now()+datetime.timedelta(hours=self.interval_hours),
+    "end_cycle_earlier": 'false'
+  }
+        self.supervisor.config_manager.update_status(current_status)
+    def cycling(self, interval_hours, period_days, supervisor):
         self.logger.info('Cycle start')
         try:
             for _ in range(int(period_days * 24 // interval_hours + 1)):
@@ -340,8 +313,7 @@ class TemperatureCycle:
                 self.logger.info(
                     f'Setting water bath temperature to {self.curr_temp}')
                 self.set_controller_temperature(self.curr_temp)
-                state.update_current_status(self.curr_temp, datetime.datetime.now(
-                ), datetime.datetime.now()+self.self.interval_hours)
+                self.update_current_satus(self.curr_temp)
                 self.logger.info(
                     f'Water bath temperature has been changed at {datetime.datetime.now()}. Next temperature cahnge in {self.interval_hours} hours')
                 if self.stop_event:
@@ -437,25 +409,8 @@ def main():
 
         attempts -= 1
         try:
-            logging.basicConfig(level=logging.INFO)
-            logger = logging.getLogger("experiment")
-            controller = WaterBathController(logger)
-            lower_temp = 4
-            higher_temp = 25
-            tasks = [
-                (
-                    TemperatureCycle,
-                    (lower_temp, higher_temp, logger, controller),
-                    {'interval_hours': 0.2, 'period_days': 1}
-                ),
-                (
-                    TemperatureLogger,
-                    (controller, logger),
-                    {'interval': 60, 'period_days': 1}
-                )
-            ]
-            experiment = ExperimentRunner(tasks)
-            experiment.start()
+            manager = main_manager("path/to/your/config.json")
+            manager.start()
         except:
             continue
 
@@ -463,4 +418,3 @@ def main():
 if __name__ == "__main__":
     main()
 print('End')
-v
