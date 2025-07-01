@@ -9,7 +9,7 @@ import logging
 import inspect
 
 
-class main_manager:
+class MainManager:
     def __init__(self, config_path):
         self.logger = logging.getLogger()
         self.logger.info(f'Experiment starting. It is {datetime.datetime.now()}')
@@ -19,6 +19,7 @@ class main_manager:
             self.code_manager
         )
     def start(self):
+        self.logger.info('Start the experiment. Code manager initialized. Starting ExperimentManager')
         self.experiment_manager.start()
 
 
@@ -27,7 +28,7 @@ class CodeManager:
         self.logger = logger
         self.config_manager = ConfigManager(config)
         self.error_handler = ErrorHandler(self.logger, self.config_manager)
-        self.thread_manager = ThreadManager(manual_interception=True)
+        self.thread_manager = ThreadManager(self, manual_interception=True)
         
 
     def recovery_needed(self):
@@ -76,7 +77,7 @@ class CodeManager:
         return tasks
 
     def handle_error(self, method, exception):
-        self.error_handler.manage_error(method, exception)
+        self.error_handler.handle_error(method, exception)
 
 
 class ConfigManager:
@@ -95,16 +96,33 @@ class ConfigManager:
         default_params = self.config["default_parameters"]
         tasks_def = default_params["tasks"]
         parsed_tasks = []
+
         for task_def in tasks_def:
-            cls, args, kwargs = self._parse_task(task_def)
+            cls_name = task_def["class"]
+            cls = globals()[cls_name]
+            args = task_def.get("args", [])
+            kwargs = task_def.get("kwargs", {}).copy()
+            use_defaults = task_def.get("use_defaults", [])
+
+            for item in use_defaults:
+                if isinstance(item, dict):
+                    param_name = item["param"]
+                    as_name = item.get("as", param_name)
+                else:
+                    param_name = as_name = item
+
+                if param_name in default_params and as_name not in kwargs:
+                    kwargs[as_name] = default_params[param_name]
+
             parsed_tasks.append((cls, args, kwargs))
+
         return parsed_tasks
 
     def _parse_task(self, task_def):
-        cls_name, args_dict = task_def
+        cls_name = task_def["class"]
+        args = task_def.get("args", [])
+        kwargs = task_def.get("kwargs", {})
         cls = globals()[cls_name]
-        args = []
-        kwargs = args_dict
         return cls, args, kwargs
 
     def recovery_parametrs_parser(self):
@@ -120,7 +138,12 @@ class ConfigManager:
     def save_config(self):
         with open(self.config_path, 'w') as f:
             json.dump(self.config, f, indent=4)
-
+    def build_object_from_config(self, config_entry):
+        cls_name = config_entry["class"]
+        args = config_entry.get("args", [])
+        kwargs = config_entry.get("kwargs", {})
+        cls = globals()[cls_name]
+        return cls(*args, **kwargs)
 
 class ErrorHandler:
     def __init__(self, logger, config_manager):
@@ -128,7 +151,7 @@ class ErrorHandler:
         self.config_manager = config_manager
 
     def mark_error_end(self):
-        self.config_manager.update_file({"end_with_error": False})
+        self.config_manager.update_status({"end_with_error": False})
 
     def log_error(self, method, error):
         self.logger.info(
@@ -144,10 +167,12 @@ class ErrorHandler:
 
 
 class ThreadManager:
-    def __init__(self):
+    def __init__(self, supervisor, manual_interception=True):
         self.stop_event = threading.Event()
+        self.supervisor = supervisor
 
     def start(self, target, name):
+        self.supervisor.logger.info('ThreadManager starts')
         t = threading.Thread(target=target, name=name)
         t.start()
         return t
@@ -156,16 +181,45 @@ class ThreadManager:
         input("Press enter to stop...\n")
         self.stop_event.set()
 
+class WaterBathController:
+    def __init__(self, logger, port='COM3', baudrate=4800, timeout=2.0):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.connection = None
+        self.is_connected = False
+        self.logger = logger
+
+    def set_command(self, command):
+        cmd_bytes = (command + '\r\n').encode('utf-8')
+        try:
+            self.connection.reset_input_buffer()
+            self.connection.reset_output_buffer()
+            self.connection.write(cmd_bytes)
+            time.sleep(5)
+            response = self.connection.readline().decode('utf-8', errors='ignore').strip()
+            self.logger.info(
+                f'Send commend {cmd_bytes} to water bath. Get response {response}')
+            return response
+        except Exception as e:
+            self.logger.info(f'Error while sending command. {e}')
 
 class ExperimentManager:
     def __init__(self, supervisor):
         self.supervisor = supervisor
     def start(self):
         try:
+            self.supervisor.logger.info('Experiment manager started.')
             if self.supervisor.recovery_needed():
+                self.supervisor.logger.info('Recovery needed.')
                 self.supervisor.recovery()
             tasks = self.supervisor.before_start()
-            self.runner = ExperimentRunner(tasks, self.supervisor)
+            self.supervisor.logger.info('Tasks obtained. Starting experiment runner')
+            controller_config = self.supervisor.config_manager.tasks_parser().get("controller")
+            self.supervisor.logger.info('Controller config obtained')
+            controller = self.supervisor.config_manager.build_object_from_config(controller_config)
+            self.supervisor.logger.info('Controller created')
+            self.runner = ExperimentRunner(tasks, self.supervisor, controller=controller)
             self.runner.start()
         except Exception as e:
             self.supervisor.handle_error("ExperimentManager.start", e)
@@ -176,17 +230,20 @@ class ExperimentRunner:
     def __init__(self, tasks, supervisor):
         self.tasks = tasks  
         self.threads = []
-        self.logger = logging.getLogger("ExperimentRunner")
+        self.logger = supervisor.logger
         self.supervisor = supervisor
+        self.controller = controller
 
     def start(self):
         try:
             self.logger.info("Experiment is starting...")
+
             for cls, args, kwargs in self.tasks:
-
-
+                args = [self.supervisor] + list(args)
+                if 'controller' in cls.__init__.__code__.co_varnames:
+                    kwargs.setdefault("controller", self.controller)
                 obj = cls(*args, **kwargs)
-
+                
                 name = getattr(obj, 'name', obj.__class__.__name__)
                 self.logger.info(f"Starting task: {name}")
 
@@ -207,8 +264,8 @@ class ExperimentRunner:
 class TemperatureLogger:
     def __init__(
             self,
+            supervisor,
             controller,
-            logger,
             filename='temperature_log.csv',
             interval=60,
             period_days=60,
@@ -218,10 +275,11 @@ class TemperatureLogger:
         with open(self.filename, 'w', newline='') as temp_log:
             logging_file = csv.writer(temp_log)
             logging_file.writerow(self.field_names)
+        self.supervisor = supervisor
         self.interval = interval
         self.controller = controller
         self.period_days = period_days
-        self.logger = logger
+        self.logger = supervisor.logger
         self.name = 'TemperatureLogger'
         self.stop_event = stop_event
 
@@ -265,13 +323,14 @@ class TemperatureLogger:
 class TemperatureCycle:
     def __init__(
             self,
+            supervisor,
             lower_temp,
             higher_temp,
-            logger,
-            controller='WaterBathController',
+            controller=WaterBathController,
             interval_hours=12,
             period_days=60,
             stop_event=None):
+        self.supervisor = supervisor
         self.lower_temp = lower_temp
         self.higher_temp = higher_temp
         self.curr_temp = higher_temp
@@ -279,14 +338,14 @@ class TemperatureCycle:
         self.interval_hours = interval_hours
         self.controller = controller
         self.period_days = period_days
-        self.logger = logger
+        self.logger = supervisor.logger
         self.stop_event = stop_event
 
     def start(self):
         self.logger.info('Starting periodic temperature changes')
         self.logger.info(
             f'Succesfully start temperature cycle. Period of cycling {self.period_days} days. Interval - {self.interval_hours} hours.')
-        self.cycling(self.interval_hours, self.period_days)
+        self.cycling(self.interval_hours, self.period_days, self.supervisor)
 
     def change_temp(self):
         self.curr_temp, self.next_temp = self.next_temp, self.curr_temp
@@ -310,42 +369,20 @@ class TemperatureCycle:
                     self.logger.info('Cycle stopped manually')
                     break
                 self.change_temp()
-                self.logger.info(
+                supervisor.logger.info(
                     f'Setting water bath temperature to {self.curr_temp}')
                 self.set_controller_temperature(self.curr_temp)
                 self.update_current_satus(self.curr_temp)
-                self.logger.info(
+                supervisor.logger.info(
                     f'Water bath temperature has been changed at {datetime.datetime.now()}. Next temperature cahnge in {self.interval_hours} hours')
                 if self.stop_event:
                     self.stop_event.wait(60 * 60 * interval_hours)
                 else:
                     time.sleep(60 * 60 * interval_hours)
         except Exception as e:
-            self.logger.info(f'Error while recording temperature. {e}')
+            supervisor.logger.info(f'Error while recording temperature. {e}')
 
 
-class WaterBathController:
-    def __init__(self, logger, port='COM3', baudrate=4800, timeout=2.0):
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
-        self.connection = None
-        self.is_connected = False
-        self.logger = logger
-
-    def set_command(self, command):
-        cmd_bytes = (command + '\r\n').encode('utf-8')
-        try:
-            self.connection.reset_input_buffer()
-            self.connection.reset_output_buffer()
-            self.connection.write(cmd_bytes)
-            time.sleep(5)
-            response = self.connection.readline().decode('utf-8', errors='ignore').strip()
-            self.logger.info(
-                f'Send commend {cmd_bytes} to water bath. Get response {response}')
-            return response
-        except Exception as e:
-            self.logger.info(f'Error while sending command. {e}')
 
     def connect(self):
         try:
@@ -404,17 +441,25 @@ class WaterBathController:
 
 
 def main():
+    logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s — %(levelname)s — %(message)s', 
+    handlers=[
+        logging.StreamHandler() 
+    ]
+    )
     attempts = 10
     while attempts > 0:
 
         attempts -= 1
         try:
-            manager = main_manager("path/to/your/config.json")
+            manager = MainManager(r"C:\Users\luttsemi\OneDrive - Victoria University of Wellington - STAFF\Mikhail Luttsev\Pyhton scripts\WaterBathController\Config.json")
             manager.start()
-        except:
+        except Exception as e:
+            print(e)
             continue
 
 
 if __name__ == "__main__":
     main()
-print('End')
+

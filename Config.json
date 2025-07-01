@@ -1,33 +1,48 @@
 {
-  "end_with_error": false,
-  "default_parameters": {
-    "high_temp": 25,
-    "low_temp": 4,
-    "cycle_duration_hours": 12,
-    "experiment_duration_days": 30,
-    "end_cycle_earlier": false
-    "tasks": [
-      {
-        "class": "TemperatureCycle",
-        "args": [],
-        "kwargs": {
-          "interval_hours": 0.2,
-          "period_days": 1
-        }
-      },
-      {
-        "class": "TemperatureLogger",
-        "args": [],
-        "kwargs": {
-          "interval": 60,
-          "period_days": 1
-        }
-      }
-    ]
-  },
-  "current_status": {
-    "current_temp": null,
-    "current_cycle_begin": null,
-    "current_cycle_end": null
-  }
+    "end_with_error": false,
+    "default_parameters": {
+        "higher_temp": 25,
+        "lower_temp": 4,
+        "cycle_duration_hours": 12,
+        "experiment_duration_days": 30,
+        "logging_interval": 60,
+        "end_cycle_earlier": false,
+        "tasks": [
+            {
+                "class": "TemperatureCycle",
+                "use_defaults": [
+                    {
+                        "param": "cycle_duration_hours",
+                        "as": "interval_hours"
+                    },
+                    {
+                        "param": "experiment_duration_days",
+                        "as": "period_days"
+                    },
+                    {
+                        "param": "lower_temp"
+                    },
+                    {
+                        "param": "higher_temp"
+                    }
+                ]
+            },
+            {
+                "class": "TemperatureLogger",
+                "use_defaults": [
+                    {
+                        "param": "logging_interval",
+                        "as": "interval"
+                    },
+                    {
+                        "param": "experiment_duration_days",
+                        "as": "period_days"
+                    }
+                ]
+            }
+        ]
+    },
+    "current_status": {
+        "end_with_error": false
+    }
 }
