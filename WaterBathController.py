@@ -7,6 +7,7 @@ import json
 import threading
 import logging
 import inspect
+from copy import deepcopy, copy
 
 
 class MainManager:
@@ -22,6 +23,83 @@ class MainManager:
         self.logger.info('Start the experiment. Code manager initialized. Starting ExperimentManager')
         self.experiment_manager.start()
 
+class WaterBathController:
+    def __init__(self, port='COM3', baudrate=4800, timeout=2.0, supervisor = None):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.connection = None
+        self.is_connected = False
+        self.supervisor = supervisor
+        self.logger = supervisor.logger
+
+    def set_command(self, command):
+        cmd_bytes = (command + '\r\n').encode('utf-8')
+        try:
+            self.connection.reset_input_buffer()
+            self.connection.reset_output_buffer()
+            self.connection.write(cmd_bytes)
+            time.sleep(5)
+            response = self.connection.readline().decode('utf-8', errors='ignore').strip()
+            self.logger.info(
+                f'Send commend {cmd_bytes} to water bath. Get response {response}')
+            return response
+        except Exception as e:
+            self.logger.info(f'Error while sending command. {e}')
+    def connect(self):
+        try:
+            self.connection = serial.Serial(port=self.port,
+                                            baudrate=self.baudrate,
+                                            bytesize=serial.EIGHTBITS,
+                                            parity=serial.PARITY_NONE,
+                                            stopbits=serial.STOPBITS_ONE,
+                                            timeout=self.timeout,
+                                            xonxoff=False,
+                                            rtscts=False,
+                                            dsrdtr=False)
+            self.is_connected = True
+            self.logger.info('Succesfully conneted to water bath')
+        except Exception as e:
+            self.logger.info(f'Error in connection. {e}')
+
+    def temperature_transformation(self, temperature):
+        temperature = '0' * (3 - len(str(temperature))) + str(temperature)
+        if len(temperature) < 8:
+            temperature = temperature + '0' * (5 - len(temperature))
+        return temperature
+
+    def set_water_bath_temperature(self, temperature):
+        attemps = 10
+        while not self.is_connected and attemps > 0:
+            self.logger.info(
+                f'No connection. Try to set connection. Attempts remaining {attemps}')
+            self.connect()
+            attemps -= 1
+            time.sleep(0.1)
+        if self.is_connected:
+            temperature = self.temperature_transformation(temperature)
+            self.set_command('S  ' + temperature)
+            self.logger.info(
+                f'Succesfully set water bath temperature - {temperature}')
+
+    def get_water_bath_temperature(self):
+        attemps = 10
+        while not self.is_connected and attemps > 0:
+            self.logger.info(
+                f'No connection. Try to set connection. Attempts remaining {attemps}')
+            self.connect()
+            attemps -= 1
+            time.sleep(0.1)
+        if self.is_connected:
+            temperature = self.set_command('I').split(' ')[0]
+            try:
+                temperature = float(temperature)
+                self.logger.info(
+                    f'Succesfully got water bath temperature - {float(temperature)}')
+                return float(temperature)
+            except Exception as e:
+                self.logger.info(f'Error while obtained temperature. {e}')
+                return None
 
 class CodeManager:
     def __init__(self, config, logger):
@@ -86,8 +164,9 @@ class ConfigManager:
         self.config = self.open_file(config_path)
 
     def open_file(self, config_path):
-        with open(config_path) as config_file:
-            return json.load(config_file)
+           with open(config_path) as config_file:
+                return json.load(config_file)
+
 
     def recovery_needed(self):
         return self.config.get("end_with_error", False)
@@ -138,10 +217,12 @@ class ConfigManager:
     def save_config(self):
         with open(self.config_path, 'w') as f:
             json.dump(self.config, f, indent=4)
-    def build_object_from_config(self, config_entry):
+    def build_object_from_config(self, config_entry, supervisor = None):
         cls_name = config_entry["class"]
-        args = config_entry.get("args", [])
-        kwargs = config_entry.get("kwargs", {})
+        args = deepcopy(config_entry.get("args", []))
+        kwargs = deepcopy(config_entry.get("kwargs", {}))
+        if supervisor is not None and "supervisor" not in kwargs:
+            kwargs["supervisor"] = supervisor
         cls = globals()[cls_name]
         return cls(*args, **kwargs)
 
@@ -181,28 +262,7 @@ class ThreadManager:
         input("Press enter to stop...\n")
         self.stop_event.set()
 
-class WaterBathController:
-    def __init__(self, logger, port='COM3', baudrate=4800, timeout=2.0):
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
-        self.connection = None
-        self.is_connected = False
-        self.logger = logger
 
-    def set_command(self, command):
-        cmd_bytes = (command + '\r\n').encode('utf-8')
-        try:
-            self.connection.reset_input_buffer()
-            self.connection.reset_output_buffer()
-            self.connection.write(cmd_bytes)
-            time.sleep(5)
-            response = self.connection.readline().decode('utf-8', errors='ignore').strip()
-            self.logger.info(
-                f'Send commend {cmd_bytes} to water bath. Get response {response}')
-            return response
-        except Exception as e:
-            self.logger.info(f'Error while sending command. {e}')
 
 class ExperimentManager:
     def __init__(self, supervisor):
@@ -215,9 +275,9 @@ class ExperimentManager:
                 self.supervisor.recovery()
             tasks = self.supervisor.before_start()
             self.supervisor.logger.info('Tasks obtained. Starting experiment runner')
-            controller_config = self.supervisor.config_manager.tasks_parser().get("controller")
-            self.supervisor.logger.info('Controller config obtained')
-            controller = self.supervisor.config_manager.build_object_from_config(controller_config)
+            controller_config = deepcopy(self.supervisor.config_manager.default_parameters_parser().get("controller"))
+            self.supervisor.logger.info(f'Controller config obtained. Controller parameters: {controller_config}')
+            controller = self.supervisor.config_manager.build_object_from_config(controller_config, self.supervisor)
             self.supervisor.logger.info('Controller created')
             self.runner = ExperimentRunner(tasks, self.supervisor, controller=controller)
             self.runner.start()
@@ -227,7 +287,7 @@ class ExperimentManager:
 
 
 class ExperimentRunner:
-    def __init__(self, tasks, supervisor):
+    def __init__(self, tasks, supervisor, controller):
         self.tasks = tasks  
         self.threads = []
         self.logger = supervisor.logger
@@ -241,7 +301,7 @@ class ExperimentRunner:
             for cls, args, kwargs in self.tasks:
                 args = [self.supervisor] + list(args)
                 if 'controller' in cls.__init__.__code__.co_varnames:
-                    kwargs.setdefault("controller", self.controller)
+                    kwargs['controller'] = self.controller
                 obj = cls(*args, **kwargs)
                 
                 name = getattr(obj, 'name', obj.__class__.__name__)
@@ -326,7 +386,7 @@ class TemperatureCycle:
             supervisor,
             lower_temp,
             higher_temp,
-            controller=WaterBathController,
+            controller,
             interval_hours=12,
             period_days=60,
             stop_event=None):
@@ -356,9 +416,9 @@ class TemperatureCycle:
     def update_current_satus(self, temperature):
         current_status = {
     "current_temp": temperature,
-    "current_cycle_begin": datetime.datetime.now(),
-    "current_cycle_end": datetime.datetime.now()+datetime.timedelta(hours=self.interval_hours),
-    "end_cycle_earlier": 'false'
+    "current_cycle_begin": datetime.datetime.now().isoformat(),
+    "current_cycle_end": (datetime.datetime.now()+datetime.timedelta(hours=self.interval_hours)).isoformat(),
+    "end_cycle_earlier": 'False'
   }
         self.supervisor.config_manager.update_status(current_status)
     def cycling(self, interval_hours, period_days, supervisor):
@@ -384,60 +444,7 @@ class TemperatureCycle:
 
 
 
-    def connect(self):
-        try:
-            self.connection = serial.Serial(port=self.port,
-                                            baudrate=self.baudrate,
-                                            bytesize=serial.EIGHTBITS,
-                                            parity=serial.PARITY_NONE,
-                                            stopbits=serial.STOPBITS_ONE,
-                                            timeout=self.timeout,
-                                            xonxoff=False,
-                                            rtscts=False,
-                                            dsrdtr=False)
-            self.is_connected = True
-            self.logger.info('Succesfully conneted to water bath')
-        except Exception as e:
-            self.logger.info(f'Error in connection. {e}')
-
-    def temperature_transformation(self, temperature):
-        temperature = '0' * (3 - len(str(temperature))) + str(temperature)
-        if len(temperature) < 8:
-            temperature = temperature + '0' * (5 - len(temperature))
-        return temperature
-
-    def set_water_bath_temperature(self, temperature):
-        attemps = 10
-        while not self.is_connected and attemps > 0:
-            self.logger.info(
-                f'No connection. Try to set connection. Attempts remaining {attemps}')
-            self.connect()
-            attemps -= 1
-            time.sleep(0.1)
-        if self.is_connected:
-            temperature = self.temperature_transformation(temperature)
-            self.set_command('S  ' + temperature)
-            self.logger.info(
-                f'Succesfully set water bath temperature - {temperature}')
-
-    def get_water_bath_temperature(self):
-        attemps = 10
-        while not self.is_connected and attemps > 0:
-            self.logger.info(
-                f'No connection. Try to set connection. Attempts remaining {attemps}')
-            self.connect()
-            attemps -= 1
-            time.sleep(0.1)
-        if self.is_connected:
-            temperature = self.set_command('I').split(' ')[0]
-            try:
-                temperature = float(temperature)
-                self.logger.info(
-                    f'Succesfully got water bath temperature - {float(temperature)}')
-                return float(temperature)
-            except Exception as e:
-                self.logger.info(f'Error while obtained temperature. {e}')
-                return None
+    
 
 
 def main():
@@ -448,7 +455,7 @@ def main():
         logging.StreamHandler() 
     ]
     )
-    attempts = 10
+    attempts = 1
     while attempts > 0:
 
         attempts -= 1

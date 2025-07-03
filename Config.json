@@ -1,6 +1,14 @@
 {
     "end_with_error": false,
     "default_parameters": {
+        "controller": {
+            "class": "WaterBathController",
+            "kwargs": {
+                "port": "COM3",
+                "baudrate": 4800,
+                "timeout": 2.0
+            }
+        },
         "higher_temp": 25,
         "lower_temp": 4,
         "cycle_duration_hours": 12,
@@ -43,6 +51,9 @@
         ]
     },
     "current_status": {
-        "end_with_error": false
+        "current_temp": 4,
+        "current_cycle_begin": "2025-07-03T16:09:32.486193",
+        "current_cycle_end": "2025-07-04T04:09:32.486193",
+        "end_cycle_earlier": "False"
     }
 }
